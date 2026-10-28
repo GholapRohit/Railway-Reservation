@@ -12,7 +12,7 @@ CREATE DATABASE IF NOT EXISTS railway_reservation
 USE railway_reservation;
 
 -- Drop in reverse dependency order so the file can be re-run safely.
-DROP VIEW  IF EXISTS v_reservation_details;
+DROP VIEW  IF EXISTS reservation_details_view;
 DROP TABLE IF EXISTS cancellation;
 DROP TABLE IF EXISTS payment;
 DROP TABLE IF EXISTS reservation;
@@ -115,9 +115,13 @@ CREATE TABLE train_halt (
 --
 -- seat_hold is a generated column: it equals seat_number while the
 -- reservation is Pending/Confirmed and becomes NULL when Cancelled.
--- The UNIQUE key on (train_id, journey_date, seat_hold) therefore stops two
+-- The UNIQUE key on (schedule_id, seat_hold) therefore stops two
 -- active bookings of the same seat, even if two requests arrive together.
 -- Cancelled rows have seat_hold = NULL, so the seat can be booked again.
+--
+-- schedule_id identifies the exact journey (a schedule is one train on one date), so
+-- train_id and journey_date repeat what the schedule already says. They are kept because the
+-- ER diagram lists them, and the API always copies them from the selected schedule.
 --
 -- All foreign keys refuse to delete or change a parent row that is still used
 -- (RESTRICT / NO ACTION), so booking history is never lost by accident.
@@ -126,6 +130,7 @@ CREATE TABLE reservation (
     reservation_id INT UNSIGNED NOT NULL AUTO_INCREMENT,
     passenger_id   INT UNSIGNED NOT NULL,
     train_id       INT UNSIGNED NOT NULL,
+    schedule_id    INT UNSIGNED NOT NULL,      -- added to the ER diagram: the exact scheduled journey (see README)
     src_station_id  INT UNSIGNED NOT NULL,
     dest_station_id INT UNSIGNED NOT NULL,
     seat_number    SMALLINT UNSIGNED NOT NULL,
@@ -136,7 +141,7 @@ CREATE TABLE reservation (
     seat_hold      SMALLINT UNSIGNED
                    GENERATED ALWAYS AS (IF(status IN ('Pending','Confirmed'), seat_number, NULL)) STORED,
     PRIMARY KEY (reservation_id),
-    UNIQUE KEY uq_active_seat (train_id, journey_date, seat_hold),
+    UNIQUE KEY uq_active_seat (schedule_id, seat_hold),
     KEY idx_reservation_journey_date (journey_date),   -- speeds up date based searches and reports
     CONSTRAINT chk_reservation_stations CHECK (src_station_id <> dest_station_id),
     CONSTRAINT chk_reservation_fare     CHECK (total_fare > 0),
@@ -145,6 +150,8 @@ CREATE TABLE reservation (
         REFERENCES passenger (passenger_id) ON DELETE RESTRICT ON UPDATE RESTRICT,
     CONSTRAINT fk_reservation_train FOREIGN KEY (train_id)
         REFERENCES train (train_id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+    CONSTRAINT fk_reservation_schedule FOREIGN KEY (schedule_id)
+        REFERENCES train_schedule (schedule_id) ON DELETE RESTRICT ON UPDATE RESTRICT,
     -- src/dest are used in chk_reservation_stations, and MySQL restricts explicit referential
     -- actions on CHECK columns. The default (NO ACTION) behaves exactly like RESTRICT in InnoDB.
     CONSTRAINT fk_reservation_src FOREIGN KEY (src_station_id)
@@ -201,10 +208,10 @@ CREATE TABLE cancellation (
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------
--- VIEW: readable reservation details (used by reservations.php,
--- payments.php, cancellations.php and SQL reports 11-12)
+-- VIEW: readable reservation details (used by the Reservations, Payments and Cancellations pages
+-- and the "Reservation Details View" SQL report)
 -- ---------------------------------------------------------------------
-CREATE VIEW v_reservation_details AS
+CREATE VIEW reservation_details_view AS
 SELECT  r.reservation_id,
         r.passenger_id,
         p.name            AS passenger_name,
